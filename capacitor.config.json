@@ -1,0 +1,14 @@
+{
+  "appId": "app.orcamentofamiliar",
+  "appName": "Orçamento Familiar",
+  "webDir": "www",
+  "android": {
+    "adjustMarginsForEdgeToEdge": "auto"
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_notify",
+      "iconColor": "#0E6E55"
+    }
+  }
+}
