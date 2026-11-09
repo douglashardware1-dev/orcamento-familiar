@@ -13,13 +13,6 @@ const CATS = [
 ];
 const CAT = Object.fromEntries(CATS.map(c=>[c.k,c]));
 const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
-const MODELO = {
-  receita:[['Salário 1',10],['Salário 2',10],['Aluguel recebido',10],['Outras receitas',20]],
-  fixas:[['Dízimo',10],['Aluguel',10],['TV por assinatura e celular',10],['Gás',10],['Conta de luz',12],['Água',15],['IPTU',30],['Condomínio',10],['Limpeza',30],['Plano de saúde',10],['Escola / cursos',10],['Inglês',1],['Mesada',30],['INSS',15],['Seguro residencial',20],['Seguro de vida',11],['Tarifa bancária',14],['Assinaturas (streaming, música)',10],['Financiamento imobiliário',1],['Empréstimo',1]],
-  cartao:[['Tarifa / anuidade do cartão',10]],
-  variaveis:[['Mercado',null],['Combustível',null],['Farmácia',null],['Lazer e restaurantes',null],['Compras avulsas no cartão (fatura)',10]],
-  aplicacao:[['Reserva de emergência',null],['CDB',null],['Ações',null],['Tesouro Direto',null],['Poupança dos filhos',null]],
-};
 
 const brl = new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'});
 const fmt = v => brl.format(v||0);
@@ -66,21 +59,37 @@ let data;
 let edit = null;      // editor de item
 let panel = null;     // 'config' | null
 let restoreArmed = false;
+let repArmed = false;
 
 const keyOf = (y,m) => `m-${y}-${String(m+1).padStart(2,'0')}`;
 const curKey = () => keyOf(Y,M);
 const prevYM = () => M===0 ? [Y-1,11] : [Y,M-1];
+const addYM = (y,m,k) => { const t=y*12+m+k; return [Math.floor(t/12), ((t%12)+12)%12]; };
+const serieOf = i => i.serie || i.id;
+function itemAnterior(y,m,i){
+  const [py,pm]=addYM(y,m,-1); const p=store.meses[keyOf(py,pm)];
+  const q=p?.itens?.find(x=>x.cat==='aplicacao' && serieOf(x)===serieOf(i));
+  return q ? {y:py,m:pm,item:q} : null;
+}
+// Saldo da aplicação antes do mês: vem do mês anterior quando a mesma aplicação existe lá
+function saldoAnt(y,m,i,depth=0){
+  const a = depth<240 ? itemAnterior(y,m,i) : null;
+  return a ? saldoAnt(a.y,a.m,a.item,depth+1)+(+a.item.realizado||0) : (+i.saldo||0);
+}
+function ultimoMesAntes(k){ return Object.keys(store.meses).filter(x=>/^m-\d{4}-\d{2}$/.test(x) && x<k).sort().pop() || null; }
+const ymOfKey = k => { const [,y,m]=/^m-(\d{4})-(\d{2})$/.exec(k); return [+y,+m-1]; };
+const mesesEntre = (a,b) => { const [ya,ma]=ymOfKey(a), [yb,mb]=ymOfKey(b); return (yb*12+mb)-(ya*12+ma); };
 function openMonth(){ data = store.meses[curKey()] || null; render(); }
 function save(){ data.atualizado = new Date().toISOString(); store.meses[curKey()] = data; persist(); render(); }
 
 /* ---------- Cálculos ---------- */
-function sums(d){
+function sums(d,y=Y,m=M){
   const r={};
   CATS.forEach(c=>{ const it=(d?.itens||[]).filter(i=>i.cat===c.k); r[c.k]={p:it.reduce((a,i)=>a+(+i.previsto||0),0), g:it.reduce((a,i)=>a+(+i.realizado||0),0), n:it.length, pagos:it.filter(i=>i.pago).length}; });
   r.desp={p:r.fixas.p+r.cartao.p+r.variaveis.p, g:r.fixas.g+r.cartao.g+r.variaveis.g};
   r.saldo={p:r.receita.p-r.desp.p, g:r.receita.g-r.desp.g};
   r.sobra={p:r.saldo.p-r.aplicacao.p, g:r.saldo.g-r.aplicacao.g};
-  r.patrimonio=(d?.itens||[]).filter(i=>i.cat==='aplicacao').reduce((a,i)=>a+(+i.saldo||0)+(+i.realizado||0),0);
+  r.patrimonio=(d?.itens||[]).filter(i=>i.cat==='aplicacao').reduce((a,i)=>a+saldoAnt(y,m,i)+(+i.realizado||0),0);
   return r;
 }
 function contasAbertas(y,m,d){
@@ -88,25 +97,35 @@ function contasAbertas(y,m,d){
 }
 
 /* ---------- Criar mês ---------- */
-function fromModelo(){
-  const itens=[];
-  CATS.forEach(c=>MODELO[c.k].forEach(([nome,venc])=>itens.push({id:uid(),cat:c.k,nome,venc:venc||null,previsto:0,realizado:0,pago:false})));
-  return itens;
+function copiaItens(itens,k){
+  const out=[];
+  (itens||[]).forEach(i=>{
+    const n={...i,id:uid(),serie:serieOf(i),realizado:0,pago:false};
+    if(i.cat==='cartao' && i.parcAtual && i.parcTotal){ n.parcAtual=i.parcAtual+k; if(n.parcAtual>i.parcTotal) return; }
+    out.push(n);
+  });
+  return out;
 }
 function createMonth(how){
   let itens=[];
-  if(how==='modelo') itens=fromModelo();
-  if(how==='anterior'){
-    const [py,pm]=prevYM(); const p=store.meses[keyOf(py,pm)];
-    (p?.itens||[]).forEach(i=>{
-      const n={...i,id:uid(),realizado:0,pago:false};
-      if(i.cat==='aplicacao'){ n.saldo=Math.round(((+i.saldo||0)+(+i.realizado||0))*100)/100; }
-      if(i.cat==='cartao' && i.parcAtual && i.parcTotal){ n.parcAtual=i.parcAtual+1; if(n.parcAtual>i.parcTotal) return; }
-      itens.push(n);
-    });
-  }
+  const src=ultimoMesAntes(curKey());
+  if((how==='copiar'||how==='copiar12') && src) itens=copiaItens(store.meses[src].itens, mesesEntre(src,curKey()));
   data={itens,obs:'',criado:new Date().toISOString()};
   save();
+  if(how==='copiar12') replicar(12);
+}
+// Copia o mês aberto para os próximos n meses que ainda não foram montados
+function replicar(n){
+  let criados=0, mantidos=0;
+  for(let j=1;j<=n;j++){
+    const [y,m]=addYM(Y,M,j), k=keyOf(y,m);
+    if(store.meses[k]){ mantidos++; continue; }
+    store.meses[k]={itens:copiaItens(data.itens,j),obs:'',criado:new Date().toISOString(),auto:true};
+    criados++;
+  }
+  persist(); render();
+  const [ly,lm]=addYM(Y,M,n);
+  toast(criados ? `${criados} ${criados===1?'mês preenchido':'meses preenchidos'} até ${MESES[lm]}/${ly}${mantidos?` · ${mantidos} já ${mantidos===1?'existia e foi mantido':'existiam e foram mantidos'}`:''}.` : 'Os próximos 12 meses já estavam montados.');
 }
 
 /* ---------- Notificações ---------- */
@@ -228,7 +247,7 @@ function renderHeader(){
   $('openCfg').onclick=()=>{ panel='config'; restoreArmed=false; renderSheet(); };
   $('shareTop') && ($('shareTop').onclick=()=>compartilhar(resumoTexto(),'Resumo do orçamento'));
 }
-function go(d){ M+=d; if(M<0){M=11;Y--} if(M>11){M=0;Y++} openMonth(); window.scrollTo({top:0}); }
+function go(d){ repArmed=false; M+=d; if(M<0){M=11;Y--} if(M>11){M=0;Y++} openMonth(); window.scrollTo({top:0}); }
 
 function renderTabs(){
   const t=[...CATS.map(c=>({k:c.k,lbl:c.short,n:c.num})),{k:'resumo',lbl:'Fechamento',n:'='}];
@@ -237,12 +256,19 @@ function renderTabs(){
 }
 
 function renderStart(){
-  const [py,pm]=prevYM(); const prevExists=!!store.meses[keyOf(py,pm)];
+  const src=ultimoMesAntes(curKey());
+  if(!src) return `<div class="start">
+    <h2>Monte o seu orçamento de ${MESES[M]}</h2>
+    <p>Comece em branco e cadastre as suas receitas, despesas fixas, compras no cartão, despesas variáveis e aplicações, cada uma na sua aba.</p>
+    <p class="small">Depois, na aba Fechamento, você pode preencher os próximos 12 meses com essa mesma lista.</p>
+    <button class="btn" data-create="vazio">Começar meu orçamento</button>
+  </div>`;
+  const [sy,sm]=ymOfKey(src);
   return `<div class="start">
     <h2>${MESES[M]} ainda não foi montado</h2>
-    <p>Escolha como começar. Depois é só preencher o provisionado e, ao longo do mês, o que foi gasto ou recebido.</p>
-    ${prevExists?`<button class="btn" data-create="anterior">Copiar de ${MESES[pm]} ${py}</button><p class="small">Mantém as linhas e os valores provisionados, zera o gasto, avança as parcelas do cartão e soma o saldo das aplicações.</p>`:''}
-    <button class="btn ${prevExists?'ghost':''}" data-create="modelo">Começar com a lista sugerida</button>
+    <p>Use a lista de ${MESES[sm]} ${sy} como ponto de partida. As linhas e os valores provisionados são mantidos, o gasto começa zerado e as parcelas do cartão avançam.</p>
+    <button class="btn" data-create="copiar12">Copiar e preencher os próximos 12 meses</button>
+    <button class="btn ghost" data-create="copiar">Copiar só para ${MESES[M]}</button>
     <button class="btn ghost" data-create="vazio">Começar em branco</button>
   </div>`;
 }
@@ -274,14 +300,14 @@ function renderSection(c){
       ${c.invest?`<div class="patr"><span class="muted">Total guardado<br><span class="small">saldo anterior + aplicado no mês</span></span><b class="num">${fmt(patr)}</b></div>`:''}
     </div>
     <div class="list">
-      ${itens.length?'':c.invest?`<div class="empty-sec">Registre quanto pretende guardar e quanto de fato aplicou em cada investimento.</div><button class="btn ghost" data-seed="aplicacao">Usar a lista sugerida de aplicações</button>`:`<div class="empty-sec">${c.k==='cartao'?'Coloque aqui as compras parceladas (ex.: notebook 3/10). A parcela avança sozinha quando você copia o mês.':'Nenhum item ainda.'}</div>`}
+      ${itens.length?'':c.invest?`<div class="empty-sec">Cadastre seus investimentos (ex.: reserva de emergência, CDB, Tesouro) com quanto pretende guardar e quanto de fato aplicou.</div>`:`<div class="empty-sec">${c.k==='cartao'?'Coloque aqui as compras parceladas (ex.: notebook 3/10). A parcela avança sozinha nos meses seguintes.':'Nenhum item ainda.'}</div>`}
       ${itens.map(i=>{
         const ov = !pos && i.realizado>i.previsto && i.previsto>0;
         return `<div class="row">
           <button class="check ${i.pago?'on':''}" data-pay="${i.id}" aria-label="Marcar como ${c.entrada?'recebido':c.invest?'aplicado':'pago'}">${CHECK}</button>
           <button class="r-main" data-edit="${i.id}" style="background:none;border:0;padding:0;text-align:left">
             <div class="r-name">${esc(i.nome)}</div>
-            <div class="r-meta">${i.venc?`<span>dia ${i.venc}</span>`:''}${c.invest&&(i.saldo||i.realizado)?`<span>total ${fmt((+i.saldo||0)+(+i.realizado||0))}</span>`:''}${i.parcTotal?`<span class="chip">${i.parcAtual||1}/${i.parcTotal}</span>`:''}${dueChip(i)}</div>
+            <div class="r-meta">${i.venc?`<span>dia ${i.venc}</span>`:''}${c.invest&&(saldoAnt(Y,M,i)||i.realizado)?`<span>total ${fmt(saldoAnt(Y,M,i)+(+i.realizado||0))}</span>`:''}${i.parcTotal?`<span class="chip">${i.parcAtual||1}/${i.parcTotal}</span>`:''}${dueChip(i)}</div>
           </button>
           <button class="r-vals" data-edit="${i.id}" style="background:none;border:0;padding:0">
             <span class="num">${fmt(i.previsto)}</span>
@@ -299,7 +325,7 @@ function renderResumo(){
   const cls=v=>v<0?'neg':v>0?'pos':'';
   const rows=CATS.filter(c=>!c.invest).map(c=>{const x=s[c.k]; const d=c.entrada?x.g-x.p:x.p-x.g; return `<tr style="--cat:var(--c-${c.k})"><td><span class="dot"></span>${c.num}. ${c.n}</td><td class="num">${fn(x.p)}</td><td class="num">${fn(x.g)}</td><td class="num ${cls(d)}">${fn(d)}</td></tr>`}).join('');
   const dd=s.desp.p-s.desp.g, ds=s.saldo.g-s.saldo.p, da=s.aplicacao.g-s.aplicacao.p, dsb=s.sobra.g-s.sobra.p;
-  const year = MESES.map((mn,m)=>{ const d=store.meses[keyOf(Y,m)]; if(!d) return ''; const x=sums(d);
+  const year = MESES.map((mn,m)=>{ const d=store.meses[keyOf(Y,m)]; if(!d) return ''; const x=sums(d,Y,m);
     return `<button class="yr ${m===M?'cur':''}" data-goto="${m}"><span>${mn}</span><span class="num muted">${fmt(x.saldo.p)}</span><span class="num ${x.saldo.g<0?'neg':''}"><b>${fmt(x.saldo.g)}</b></span></button>`}).join('');
   return `<div class="sec-head" style="--cat:var(--accent)"><span class="eyebrow">Fechamento do mês</span><h2>Provisionado × realizado</h2></div>
   <div class="card">
@@ -314,6 +340,11 @@ function renderResumo(){
     <p class="small muted" style="margin:10px 0 0">Diferença positiva = economizou nas despesas, recebeu ou aplicou mais que o previsto. Total guardado nas aplicações: <b class="num">${fmt(s.patrimonio)}</b>.</p>
   </div>
   <button class="btn wa" id="shareRes" style="width:100%;margin-bottom:12px">Enviar resumo pelo WhatsApp</button>
+  <div class="card">
+    <h3>Próximos meses</h3>
+    <p class="small muted" style="margin:0 0 10px">Copia as linhas e os valores provisionados de ${MESES[M]} para ${MESES[addYM(Y,M,1)[1]]}/${addYM(Y,M,1)[0]} até ${MESES[addYM(Y,M,12)[1]]}/${addYM(Y,M,12)[0]}. Meses que você já montou não mudam, e as parcelas do cartão avançam e saem quando terminam.</p>
+    <button class="btn ${repArmed?'':'ghost'}" id="repBtn" style="width:100%">${repArmed?'Confirmar: preencher os próximos 12 meses':'Preencher os próximos 12 meses'}</button>
+  </div>
   <div class="card">
     <h3>Por grupo</h3>
     <div class="legend"><span><i class="p"></i>Provisionado</span><span><i></i>Realizado</span></div>
@@ -348,7 +379,7 @@ function render(){
 function bindMain(){
   const main=$('main');
   main.querySelectorAll('[data-create]').forEach(b=>b.onclick=()=>createMonth(b.dataset.create));
-  main.querySelectorAll('[data-seed]').forEach(b=>b.onclick=()=>{ const k=b.dataset.seed; MODELO[k].forEach(([nome,venc])=>data.itens.push({id:uid(),cat:k,nome,venc:venc||null,previsto:0,realizado:0,saldo:0,pago:false})); save(); });
+  $('repBtn') && ($('repBtn').onclick=()=>{ if(!repArmed){ repArmed=true; render(); return; } repArmed=false; replicar(12); });
   main.querySelectorAll('[data-pay]').forEach(b=>b.onclick=()=>{
     const i=data.itens.find(x=>x.id===b.dataset.pay); if(!i) return;
     i.pago=!i.pago; if(i.pago && !i.realizado) i.realizado=i.previsto; save();
@@ -398,7 +429,7 @@ function renderSheet(){
       <div class="field"><label for="f-prev">${c.prev} (R$)</label><input id="f-prev" inputmode="decimal" value="${toInput(d.previsto)}" placeholder="0,00"></div>
       <div class="field"><label for="f-real">${c.real} (R$)</label><input id="f-real" inputmode="decimal" value="${toInput(d.realizado)}" placeholder="0,00"></div>
     </div>
-    ${c.invest?`<div class="field"><label for="f-saldo">Saldo antes deste mês (R$)</label><input id="f-saldo" inputmode="decimal" value="${toInput(d.saldo)}" placeholder="0,00"></div>`:''}
+    ${c.invest?(edit.id&&itemAnterior(Y,M,d)?`<div class="field"><label>Saldo antes deste mês</label><div class="num" style="padding:4px 0;font-weight:600">${fmt(saldoAnt(Y,M,d))}</div><span class="small muted">Calculado a partir de ${MESES[itemAnterior(Y,M,d).m]}: saldo anterior + aplicado.</span></div>`:`<div class="field"><label for="f-saldo">Saldo antes deste mês (R$)</label><input id="f-saldo" inputmode="decimal" value="${toInput(d.saldo)}" placeholder="0,00"></div>`):''}
     <button type="button" class="link" id="f-same">${c.real} = ${c.prev.toLowerCase()}</button>
     <div class="actions">
       ${edit.id?`<button type="button" class="btn danger ${edit.armed?'armed':''}" id="f-del">${edit.armed?'Confirmar':'Excluir'}</button>`:`<button type="button" class="btn ghost" id="f-cancel">Cancelar</button>`}
